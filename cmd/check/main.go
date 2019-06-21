@@ -5,6 +5,10 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	//"log"
+	"net/http/httptrace"
+
+	//"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -34,11 +38,17 @@ import (
 
 func main() {
 	logger := lager.NewLogger("http")
+	logger.RegisterSink(lager.NewWriterSink(os.Stdout, lager.DEBUG))
+
+	logger.Info("Beginning of main in check")
+	fmt.Fprintf(os.Stderr, "\n\nBeginning of main() in check\n\n")
+
 	rECRRepo, err := regexp.Compile(`[a-zA-Z0-9][a-zA-Z0-9_-]*\.dkr\.ecr\.[a-zA-Z0-9][a-zA-Z0-9_-]*\.amazonaws\.com(\.cn)?[^ ]*`)
 	fatalIf("failed to compile ECR regex", err)
 
 	var request CheckRequest
-	err = json.NewDecoder(os.Stdin).Decode(&request)
+	var a = strings.NewReader("{\"source\":{\"repository\": \"ubuntu\"}}")
+	err = json.NewDecoder(a).Decode(&request)
 	fatalIf("failed to read request", err)
 
 	os.Setenv("AWS_ACCESS_KEY_ID", request.Source.AWSAccessKeyID)
@@ -194,9 +204,41 @@ func makeTransport(logger lager.Logger, request CheckRequest, registryHost strin
 	authTransport := transport.NewTransport(baseTransport)
 
 	pingClient := &http.Client{
-		Transport: retryRoundTripper(logger, authTransport),
-		Timeout:   1 * time.Minute,
+		//Transport: retryRoundTripper(logger, authTransport),
+		Transport: http.DefaultTransport,
+		Timeout:   10 * time.Second,
 	}
+
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(dnsInfo httptrace.DNSStartInfo) {
+			fmt.Printf("\nDNS Start Info: %+v\n", dnsInfo)
+		},
+		DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
+			fmt.Printf("\nDNS Done Info: %+v\n", dnsInfo)
+		},
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			fmt.Printf("\nGot Conn: %+v\n", connInfo)
+		},
+		GetConn: func(hostPort string){
+			fmt.Printf("\nGet Conn: %+v\n", hostPort)
+		},
+		// ConnectStart is called when a new connection's Dial begins.
+		// If net.Dialer.DualStack (IPv6 "Happy Eyeballs") support is
+		// enabled, this may be called multiple times.
+		ConnectStart: func(protocol, addr string){
+			fmt.Printf("\nConnect Start: %+v --> %+v  \n", protocol, addr)
+		},
+
+		// ConnectDone is called when a new connection's Dial
+		// completes. The provided err indicates whether the
+		// connection completedly successfully.
+		// If net.Dialer.DualStack ("Happy Eyeballs") support is
+		// enabled, this may be called multiple times.
+		ConnectDone: func(network, addr string, err error){
+			fmt.Printf("\nConnect Done: %+v --> %+v  \n", network, addr)
+		},
+	}
+
 
 	challengeManager := auth.NewSimpleChallengeManager()
 
@@ -209,13 +251,20 @@ func makeTransport(logger lager.Logger, request CheckRequest, registryHost strin
 		registryURL = scheme + "://" + registryHost
 
 		req, err := http.NewRequest("GET", registryURL+"/v2/", nil)
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 		fatalIf("failed to create ping request", err)
+
+		//if _, err := http.DefaultTransport.RoundTrip(req); err != nil {
+		//	log.Fatal(err)
+		//}
 
 		pingResp, pingErr = pingClient.Do(req)
 		if pingErr == nil {
 			// clear out previous attempts' failures
 			pingErrs = nil
 			break
+		} else {
+			fmt.Fprintf(os.Stderr, pingErr.Error())
 		}
 
 		pingErrs = multierror.Append(
